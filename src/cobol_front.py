@@ -104,7 +104,9 @@ def read_xml(src):
     return process_node(tree.getroot())
 
 
-def process_cond(body, cond):
+def process_cond(body, cond, symbol_table):
+    for i in symbol_table:
+        print(i)
     if len(cond) == 1:
         if isinstance(cond[0], OpResult):
             return cond[0]
@@ -147,19 +149,19 @@ def process_cond(body, cond):
 
     if cond[0] == "(":
         end = find_matching_paren(0, cond)
-        res = process_cond(body, cond[1:end])
+        res = process_cond(body, cond[1:end], symbol_table)
         if end == len(cond) - 1:
             return res
         else:
             cond[end] = res
-            return process_cond(body, cond[end : len(cond)])
+            return process_cond(body, cond[end : len(cond)], symbol_table)
 
     for i, tok in enumerate(cond):
         if not isinstance(tok, str):
             continue
         if tok.lower() == "and":
-            lhs = process_cond(body, cond[:i])
-            rhs = process_cond(body, cond[i + 1 :])
+            lhs = process_cond(body, cond[:i], symbol_table)
+            rhs = process_cond(body, cond[i + 1 :], symbol_table)
             and_op = AndIOp(operands=[lhs, rhs], result_types=[cobol_bool()])
             body.add_op(and_op)
             return and_op.result
@@ -168,8 +170,8 @@ def process_cond(body, cond):
         if not isinstance(tok, str):
             continue
         if tok.lower() == "or":
-            lhs = process_cond(body, cond[:i])
-            rhs = process_cond(body, cond[i + 1 :])
+            lhs = process_cond(body, cond[:i], symbol_table)
+            rhs = process_cond(body, cond[i + 1 :], symbol_table)
             or_op = OrIOp(operands=[lhs, rhs], result_types=[cobol_bool()])
             body.add_op(or_op)
             return or_op.result
@@ -198,7 +200,7 @@ def process_cond(body, cond):
         if not isinstance(tok, str):
             continue
         if tok.lower() == "not":
-            expr = process_cond(body, cond[i + 1 :])
+            expr = process_cond(body, cond[i + 1 :], symbol_table)
             not_op = NotOp(operands=[expr], result_types=[cobol_decimal(1, 1)])
             body.add_op(not_op)
             return not_op.result
@@ -208,8 +210,8 @@ def process_cond(body, cond):
             continue
         comp_operators = ["eq", "ne", "slt", "sle", "sgt", "sge"]
         if tok in comp_operators:
-            lhs = process_cond(body, cond[:i])
-            rhs = process_cond(body, cond[i + 1 :])
+            lhs = process_cond(body, cond[:i], symbol_table)
+            rhs = process_cond(body, cond[i + 1 :], symbol_table)
             cmp_op = CmpIOp(
                 operands=[lhs, rhs],
                 result_types=[cobol_bool()],
@@ -223,7 +225,7 @@ def process_cond(body, cond):
             return cmp_op.result
 
 
-def process_expression(body, expression):
+def process_expression(body, expression, symbol_table):
     if len(expression) == 1:
         if isinstance(expression[0], OpResult):
             return expression[0]
@@ -305,7 +307,7 @@ def process_expression(body, expression):
 
 # dictionary for declared and/or defined vars
 # var_name: { value, result }
-symbol_table = {}
+
 
 
 # def process_statements(body: Block, lines: any, first_run: bool, module_ops: any = None) -> ModuleOp:
@@ -371,20 +373,47 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
         elif operation.get("DISPLAY"):
             arg_list = operation.get("DISPLAY")
             ops = []
-            for arg in arg_list:
-                type = arg[1]
-                if type == "lit":
-                    op = ConstantOp(
-                        attributes={"value": StringAttr(arg[0])},
-                        result_types=[cobol_string(len(arg[0]))],
+            is_no_advancing = operation.get("no_advancing")
+            if is_no_advancing:
+                for arg in arg_list:
+                    type = arg[1]
+                    if type == "lit":
+                        op = ConstantOp(
+                            attributes={"value": StringAttr(arg[0])},
+                            result_types=[cobol_string(len(arg[0]))],
+                        )
+                        body.add_op(op)
+                        ops.append(op.result)
+                    elif arg[0].upper() == "ADVANCING":
+                        continue
+                    else:
+                        var = symbol_table[arg[0]]
+                        ops.append(var["result"])
+                    newline_op = ConstantOp(
+                        attributes={"value": StringAttr("\\n")},
+                        result_types=[cobol_string(1)],
                     )
-                    body.add_op(op)
-                    ops.append(op.result)
-                else:
-                    var = symbol_table[arg[0]]
-                    ops.append(var["result"])
-            disp_op = DisplayOp(operands=[ops])
-            body.add_op(disp_op)
+                    body.add_op(newline_op)
+                    ops.append(newline_op.result)
+                disp_op = DisplayOp(operands=[ops])
+                body.add_op(disp_op)
+            else:
+                for arg in arg_list:
+                    type = arg[1]
+                    if type == "lit":
+                        op = ConstantOp(
+                            attributes={"value": StringAttr(arg[0])},
+                            result_types=[cobol_string(len(arg[0]))],
+                        )
+                        body.add_op(op)
+                        ops.append(op.result)
+                    elif arg[0].upper() == "ADVANCING":
+                        continue
+                    else:
+                        var = symbol_table[arg[0]]
+                        ops.append(var["result"])
+                disp_op = DisplayOp(operands=[ops])
+                body.add_op(disp_op)
             continue
 
         elif operation.get("DIV"):
@@ -398,7 +427,7 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
 
         elif operation.get("IF"):
             data = operation.get("IF")
-            res_cond = process_cond(body, data["cond"])
+            res_cond = process_cond(body, data["cond"], symbol_table)
 
             else_region = Region(Block()) if data["else"] else None
             ifOp = IfOp(
@@ -408,12 +437,12 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
                 return_types=[],
             )
             then_block = ifOp.true_region.block
-            process_statements(then_block, data["then"], False)
+            process_statements(then_block, data["then"], False, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module_ops)
             then_block.add_op(YieldOp())
 
             if else_region:
                 else_block = ifOp.false_region.block
-                process_statements(else_block, data["else"], False)
+                process_statements(else_block, data["else"], False, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module_ops)
                 else_block.add_op(YieldOp())
 
             body.add_op(ifOp)
@@ -443,7 +472,7 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
             # Build the loop body region
             loop_region = Region(Block())
             loop_block = loop_region.block
-            process_statements(loop_block, loop_body_stmts, False)
+            process_statements(loop_block, loop_body_stmts, False, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module_ops)
 
             perform_op = PerformOp(
                 operands=[times_result],
@@ -467,7 +496,7 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
 
                 if case["other"]:
                     # WHEN OTHER — just emit the statements directly
-                    process_statements(target_body, case["stmts"], False)
+                    process_statements(target_body, case["stmts"], False, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module_ops)
                     return
 
                 # Create comparison: subject == value
@@ -505,10 +534,10 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
                 # Build then region
                 then_region = Region(Block())
                 then_block = then_region.block
-                process_statements(then_block, case["stmts"], False)
+                process_statements(then_block, case["stmts"], False, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module_ops)
                 then_block.add_op(YieldOp())
 
-                # Build else region with remaining cases (recursive)
+                # Build else region with remaining cases (recursive)process_cond
                 else_region = Region(Block())
                 else_block = else_region.block
                 build_evaluate_chain(else_block, case_idx + 1)
@@ -749,7 +778,7 @@ def emit_cobol_dialect(lines):
     defined_paragraphs = set()
     defined_sections = set()
     defined_paragraphs1 = set()
-    process_statements(body, lines, True,symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module.body.block)
+    process_statements(body, lines, True, symbol_table, defined_paragraphs, defined_sections, defined_paragraphs1, module.body.block)
     # process_statements(body, lines, True, module_ops)
 
     # module_ops.append(fun)
