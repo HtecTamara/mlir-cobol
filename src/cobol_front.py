@@ -75,6 +75,14 @@ def cobol_decimal(d: int, s: int = 0):
 def cobol_record(name: str):
     return CobolRecordType(StringAttr(name))
 
+def count_9(part):
+    if isinstance(part, int):
+        return part
+    if '(' in part and ')' in part:
+        n = int(part[part.find('(') + 1: part.find(')')])
+    else:
+        n = len(part)
+    return n
 
 def run_koopa(src):
     koopa_path = os.environ.get("KOOPA_PATH", "")
@@ -105,8 +113,8 @@ def read_xml(src):
 
 
 def process_cond(body, cond, symbol_table):
-    for i in symbol_table:
-        print(i)
+    #for i in symbol_table:
+    #    print(i)
     if len(cond) == 1:
         if isinstance(cond[0], OpResult):
             return cond[0]
@@ -640,22 +648,30 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
             frac_part = data.get("frac_part")
 
             if struct_regions_stack:
-                # Uzimamo ime trenutne aktivne strukture sa vrha stack-a
-                parent_name = struct_regions_stack[-1][2] # Moraš dodati ime u stack pri STRUCT-u
+                parent_name = struct_regions_stack[-1][2]
                 full_name = f"{parent_name}.{name}"
             else:
                 full_name = name
-            def get_float_type(digits: int) -> int:
-                if digits <= 4:
-                    return 16
-                if digits <= 7:
-                    return 32
-                return 64
-
-            if not literal:
-                literal = 0 if type == "int" or type == "float" else ""
-
+            if int_part is None:
+                int_part = 0
+            if frac_part is None:
+                frac_part = 0
+            if length is None:
+                length = int_part
+            if literal is None or (isinstance(literal, str) and literal.strip() == ""):
+                if type == "int":
+                    literal = 0
+                elif type == "float":
+                    literal = 0.0    
+                else:
+                    literal = ""
             if type == "int":
+                if not isinstance(literal, int):
+                    try:
+                        literal = int(literal)
+                    except Exception:
+                        literal = 0
+
                 for width in (8, 16, 32, 64):
                     if 10**length < 2**(width-1):
                         decl_value = IntegerAttr(literal, width)
@@ -665,10 +681,17 @@ def process_statements(body: Block, lines: any, first_run: bool, symbol_table: d
                 decl_value = StringAttr(literal)
                 res_type = cobol_string(length)
             elif type == "float":
-                total_digits = int_part + frac_part
-                float_type = get_float_type(total_digits)
-                decl_value = FloatAttr(literal, float_type)
+                float_width = 64   # double
+                try:
+                    f_val = float(literal)
+                except Exception:
+                    f_val = 0.0
+                decl_value = FloatAttr(f_val, float_width)
+                int_part = count_9(int_part)    # '9(6)' -> 6
+                frac_part = count_9(frac_part)  # '9(2)' -> 2
+                length = int_part + frac_part 
                 res_type = cobol_decimal(int_part, frac_part)
+            
             else:
                 # unknown type
                 pass
