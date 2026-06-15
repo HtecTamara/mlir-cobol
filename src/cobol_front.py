@@ -104,7 +104,8 @@ def run_koopa(src):
             "--free-format",
             src,
             "test/Output/build_xml/" + os.path.splitext(src.name)[0] + ".xml",
-        ]
+        ],
+        capture_output=True
     )
 
 
@@ -464,6 +465,7 @@ def process_statements(
         elif operation.get("DISPLAY"):
             arg_list = operation.get("DISPLAY")
             ops = []
+            index = None      
             attrs = {}
             advancing = operation.get("advancing")
             first_name = arg_list[0][0]
@@ -488,20 +490,20 @@ def process_statements(
                     body.add_op(newline_op)
                     ops.append(newline_op.result)
 
-                disp_op = DisplayOp(operands=[ops])
+                disp_op = DisplayOp(operands=ops)
                 body.add_op(disp_op)
                 continue
             for arg in arg_list:
                 type = arg[1]
-
+                index = arg[2] if len(arg) > 2 else None
                 if type == "lit":
-                    op = ConstantOp(
+                    const_op = ConstantOp(
                         attributes={"value": StringAttr(arg[0])},
                         result_types=[cobol_string(len(arg[0]))],
                     )
-                    body.add_op(op)
-                    ops.append(op.result)
 
+                    body.add_op(const_op)
+                    ops.append(const_op.result)
                 else:
                     var_name = arg[0]
    
@@ -512,10 +514,8 @@ def process_statements(
                     value = var["result"]
 
                     if len(arg) == 2:
-                        # bez reference modifiera
                         ops.append(value)
                     else:
-                        # sa start/length reference modifierom
                         start = arg[2]
                         length = arg[3]
                         ops.append(value)
@@ -528,11 +528,13 @@ def process_statements(
                 )
                 body.add_op(newline_op)
                 ops.append(newline_op.result)
+            if index is not None:
+                idx_int = int(index)
+                attrs["index"] = IntegerAttr.from_int_and_width(idx_int, 32)
             if attrs:
-                disp_op = DisplayOp(operands=[ops], attributes=attrs)
+                disp_op = DisplayOp(operands=ops, attributes=attrs)
             else:
-                disp_op = DisplayOp(operands=[ops])
-
+                disp_op = DisplayOp(operands=ops)
             body.add_op(disp_op)
             continue
         elif operation.get("DIV"):
@@ -701,10 +703,12 @@ def process_statements(
             continue
 
         elif operation.get("MOVE"):
-            data = operation.get("MOVE")
+            data = operation["MOVE"]
 
-            data_dst = data[0]
-            data_src = data[1]
+            data_dst = data["dst"]         
+            data_dst_index = data["dst_index"]  
+            data_src = data["src"]
+            src_is_literal = data["src_is_literal"]
 
             if isinstance(data_src, int):
                 for width in (8, 16, 32, 64):
@@ -713,13 +717,13 @@ def process_statements(
                         break
                 res = cobol_decimal(len(str(data_src)), 0)
 
-            elif data_src in symbol_table:
+            elif not src_is_literal and data_src in symbol_table:
                 symbol_table[data_dst]["value"] = data_src
                 sym_value = symbol_table[data_src]["value"]
 
                 if isinstance(sym_value, int):
                     for width in (8, 16, 32, 64):
-                        if sym_value< 2**(width-1):
+                        if sym_value < 2**(width - 1):
                             value = IntegerAttr(sym_value, width)
                             break
                     res = cobol_decimal(len(str(sym_value)), 0)
@@ -727,15 +731,39 @@ def process_statements(
                     value = StringAttr(sym_value)
                     res = cobol_string(len(sym_value))
 
-            else:  # type[src] = string
+            else:  
                 value = StringAttr(data_src)
                 res = cobol_string(len(data_src))
 
             constOp = ConstantOp(attributes={"value": value}, result_types=[res])
             body.add_op(constOp)
             src = constOp.result
-            dst = symbol_table[data_dst]["result"]
-            body.add_op(MoveOp(operands=[src, dst]))
+            if data_dst_index is not None:
+                idx = data_dst_index - 1
+                if "value" not in symbol_table[data_dst] or not isinstance(symbol_table[data_dst]["value"], list):
+                    symbol_table[data_dst]["value"] = []
+                arr = symbol_table[data_dst]["value"]
+
+                if idx >= len(arr):
+                    arr.extend([None] * (idx + 1 - len(arr)))
+
+                if isinstance(data_src, int):
+                    arr[idx] = data_src
+                elif not src_is_literal and data_src in symbol_table:
+                    arr[idx] = symbol_table[data_src]["value"]
+                else:
+                    arr[idx] = data_src
+                dst = symbol_table[data_dst]["result"]
+            else:
+                dst = symbol_table[data_dst]["result"]
+                if isinstance(data_src, int):
+                    symbol_table[data_dst]["value"] = data_src
+                elif not src_is_literal and data_src in symbol_table:
+                    symbol_table[data_dst]["value"] = symbol_table[data_src]["value"]
+                else:
+                    symbol_table[data_dst]["value"] = data_src
+            idx_attr = IntegerAttr(data_dst_index, 32)
+            body.add_op(MoveOp(operands=[src, dst], attributes={"index": idx_attr}))
             continue
 
         elif operation.get("MUL"):
@@ -764,6 +792,10 @@ def process_statements(
             type = data.get("type")
             length = data.get("length")
             level = int(data.get("level"))
+            occurs = data.get("occurs")
+            if occurs is None:
+                occurs = 1
+            occurs = int(occurs)
             external = data.get("is_external")
 
             if name in symbol_table:
@@ -832,7 +864,8 @@ def process_statements(
                 pass
 
             declOp = DeclareOp(
-                attributes={"value": decl_value, "level": IntegerAttr(int(level), 8), "external":  IntegerAttr(1 if external else 0, 1)},
+
+                attributes={"name": StringAttr(name), "value": decl_value, "level": IntegerAttr(int(level), 8), "occurs": IntegerAttr(occurs, 32), "elem_len": IntegerAttr(length, 32),  "external":  IntegerAttr(1 if external else 0, 1)},
                 result_types=[res_type],
             )
 
@@ -857,7 +890,8 @@ def process_statements(
                     "external": external
                 }
             else:
-                symbol_table[name] = {"value": None, "result": declOp.result, "external": external}
+                symbol_table[name] = {"value": None, "result": declOp.result, "occurs": occurs, "elem_length": length, "external": external}
+
             continue
 
         elif operation.get("STRUCT"):

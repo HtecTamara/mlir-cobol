@@ -169,6 +169,15 @@ def handle_dataDescriptionEntry(elem):
     numeric_literal = extractText(elem, "numericLiteral")
     scope = extractText(elem, "levelNumber")
 
+    occurs_count = 1
+    occurs_clause = elem.find(".//occursClause")
+    if occurs_clause is not None:
+        int_lit = occurs_clause.find(".//integerLiteral/t")
+
+        if int_lit is not None and int_lit.text is not None:
+            txt = int_lit.text.strip()
+            if txt != "":
+                occurs_count = int(txt)
     length = 0
 
     # for floats:
@@ -279,6 +288,7 @@ def handle_dataDescriptionEntry(elem):
             "level": scope,
             "int_part": int_part,
             "frac_part": frac_part,
+            "occurs": occurs_count
             "is_external": is_external
         }
     }
@@ -295,45 +305,91 @@ def handle_displayStatement(elem):
     advancing = False
 
     literals_raw = extractText(elem, "alphanumericLiteral")
-
-
     literals = [s for _, s in re.findall(r"""(['"])(.*?)\1""", literals_raw)]
-
     for l in literals:
         args.append([l, "lit"])
 
     for ident in elem.findall(".//identifier"):
-        name = "".join(t.text for t in ident.findall(".//t") if t.text).strip()
-        if name.upper() == "ADVANCING":
+        name_full = "".join(t.text for t in ident.findall(".//t") if t.text).strip()
+        if name_full.upper() == "ADVANCING":
             advancing = True
             continue
-        cw = ident.find(".//qualifiedDataName//dataName//cobolWord")
-        if cw is None:
-            cw = ident.find(".//cobolWord")
-        if cw is None:
-            continue
-        var_name = "".join(t.text for t in cw.findall("t") if t.text)
-        ref_mod = ident.find(".//referenceModifier")
-        if ref_mod is None:
-            args.append([var_name, "var"])
-            continue
-        ints = []
-        for il in ref_mod.findall(".//integerLiteral"):
-            txt = "".join(t.text for t in il.findall("t") if t.text)
-            if txt:
-                ints.append(int(txt))
 
-        if not ints:
-            args.append([var_name, "var"])
+        qname = ident.find(".//qualifiedDataName")
+        if qname is not None:
+            name_node = qname.find(".//dataName//cobolWord//t")
+            if name_node is None:
+                continue
+            var_name = name_node.text.strip()
+            ref_mod = ident.find(".//referenceModifier")
+            if ref_mod is not None:
+                ints = []
+                for il in ref_mod.findall(".//integerLiteral"):
+                    txt = "".join(t.text for t in il.findall("t") if t.text)
+                    if txt:
+                        ints.append(int(txt))
+
+                if ints:
+                    start = ints[0]
+                    length = ints[1] if len(ints) > 1 else None
+                    args.append([var_name, "var", start, length])
+                    continue 
+
+            sub = qname.find(".//subscript")
+            if sub is None:
+                args.append([var_name, "var"])
+            else:
+                lit_node = sub.find(".//integerLiteral//t")
+                if lit_node is not None:
+                    index = lit_node.text.strip()
+                else:
+                    idx_name_node = sub.find(".//identifier//cobolWord//t")
+                    index = idx_name_node.text.strip() if idx_name_node is not None else None
+
+                if index is not None:
+                    args.append([var_name, "var", index])
+                else:
+                    args.append([var_name, "var"])
+
         else:
-            start = ints[0]
-            length = ints[1] if len(ints) > 1 else None
-            args.append([var_name, "var", start, length])
+            cw = ident.find(".//cobolWord")
+            if cw is None:
+                continue
+            var_name = "".join(t.text for t in cw.findall("t") if t.text)
 
-    return {"DISPLAY": args,
-            "advancing": advancing
-        }
+            ref_mod = ident.find(".//referenceModifier")
+            if ref_mod is not None:
+                ints = []
+                for il in ref_mod.findall(".//integerLiteral"):
+                    txt = "".join(t.text for t in il.findall("t") if t.text)
+                    if txt:
+                        ints.append(int(txt))
 
+                if ints:
+                    start = ints[0]
+                    length = ints[1] if len(ints) > 1 else None
+                    args.append([var_name, "var", start, length])
+                    continue
+            sub = ident.find(".//subscript")
+            if sub is not None:
+                lit_node = sub.find(".//integerLiteral//t")
+                if lit_node is not None:
+                    index = lit_node.text.strip()
+                else:
+                    idx_name_node = sub.find(".//identifier//cobolWord//t")
+                    index = idx_name_node.text.strip() if idx_name_node is not None else None
+
+                if index is not None:
+                    args.append([var_name, "var", index])
+                else:
+                    args.append([var_name, "var"])
+            else:
+                args.append([var_name, "var"])
+
+    return {
+        "DISPLAY": args,
+        "advancing": advancing
+    }
 def handle_divideStatement(elem):
     idents = extractVarNames(elem, "identifier")
     # first one: arg, second one: arg & res
@@ -362,19 +418,41 @@ def handle_moveStatement(elem):
     if not value:
         sendingOprnd = extractText(elem, "sending//identifier")
         allOprnds = extractText(elem, "identifier")
-        receivingOprnd = allOprnds[len(allOprnds) - len(sendingOprnd) :]
-        return {"MOVE": [receivingOprnd, sendingOprnd]}
-
+        receivingOprnd = allOprnds[len(allOprnds) - len(sendingOprnd):]
+        recv_name = extractText(elem, "identifier//cobolWord")
+        recv_index = extractText(elem, "identifier//index") 
+        if recv_index:
+            recv_index = int(recv_index)          
+        return {
+            "MOVE": {
+                "dst": recv_name,
+                "dst_index": recv_index, 
+                "src": sendingOprnd,
+                "src_is_literal": False,
+            }
+        }
     var_name = extractText(elem, "cobolWord")
-    int_value = extractText(elem, "integerLiteral")
+    int_value = extractText(elem, "numericLiteral//integerLiteral")
     str_value = extractText(elem, "alphanumericLiteral")
     value = int(int_value) if int_value else str_value.strip('"').strip("'")
+    recv_name = extractText(elem, "identifier//cobolWord") or var_name
+    recv_index = extractText(elem, "identifier//integer")
+    if recv_index:
+        recv_index = int(recv_index)
+    return {
+        "MOVE": {
+            "dst": recv_name,
+            "dst_index": recv_index,
+            "src": value,
+            "src_is_literal": True,
+        }
+    }
 
-    return {"MOVE": [var_name, value]}
 
 def handle_section(elem):
     name = extractText(elem, "sectionName")
     return {"SECTION": name}
+
 
 def handle_multiplyStatement(elem):
     idents = extractVarNames(elem, "identifier")
