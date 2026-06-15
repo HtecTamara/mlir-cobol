@@ -102,7 +102,10 @@ class CobolDecimalTypeConversion(TypeConversionPattern):
         length = type.digits.value.data
         scale = type.scale.value.data
         if scale:
-            return Float64Type()
+            if scale <= 4:
+                return Float32Type()
+            else:
+                return Float64Type()
         else:
             if length <= 2:
                 return EmitCIntegerType(8) 
@@ -235,87 +238,126 @@ class ConvertConstantOp(RewritePattern):
         rewriter.replace_op(op, const_op)
 
 
+from xdsl.dialects.builtin import IntegerType, AnyFloat
+
+def map_type_to_c(t) -> str:
+    if str(t) == "i8":
+        return "int8_t"
+    if str(t) == "i16":
+        return "int16_t"
+    if str(t) == "ida nisi nesto preskocio
+    32":
+        return "int32_t"
+    if str(t) == "i64":
+        return "int64_t"
+    if str(t) == "f32":
+        return "float"
+    if str(t) == "f64":
+        return "double"
+    return "int"
 @dataclass
 class ConvertDeclareOp(RewritePattern):
+    var_counter: int = 1
     @op_type_rewrite_pattern
     def match_and_rewrite(self, op: DeclareOp, rewriter: PatternRewriter):
         name = op.attributes["name"].data
         sym_value = op.attributes["value"]
         op_res_type = op.result.type
-        occurs = op.attributes["occurs"]
-        occurs = occurs.value.data
-        # print("sym_name ", sym_value)
-        # print("op res type ", op_res_type)
+        occurs_attr = op.attributes["occurs"]
+        occurs = occurs_attr.value.data
+
+        is_external_attr = op.attributes.get("external")
+        is_external = False
+        if is_external_attr is not None:
+            is_external = is_external_attr.value.data != 0
+
+        name_attr = op.attributes.get("name")
+        if name_attr is not None:
+            var_name = name_attr.data
+        else:
+            var_name = f"v{self.var_counter}"
+            self.var_counter += 1
+
+        if is_external:
+            c_type = map_type_to_c(op.result.type)
+            line = f"extern {c_type} {var_name};"
+            extern_op = EmitC_VerbatimOp(
+                value=StringAttr(line),
+                operands=[],
+            )
+            rewriter.insert_op(extern_op)
+            rewriter.erase_op(op)
+            return
+
         if occurs == 1:
             if isinstance(op_res_type, IntegerType):
                 var_op = EmitC_VariableOp(
                     EmitC_OpaqueAttr(StringAttr(str(sym_value.value.data))),
                     EmitC_LValueType(op_res_type),
                 )
-                rewriter.replace_op(op, var_op)
 
             elif isinstance(op_res_type, AnyFloat):
-                # print("Float je")
                 var_op = EmitC_VariableOp(
                     EmitC_OpaqueAttr(StringAttr(str(sym_value.value.data))),
                     EmitC_LValueType(op_res_type),
                 )
-                rewriter.replace_op(op, var_op)
 
             elif isinstance(op_res_type, EmitC_LValueType):
-                # either std::string or custom user type (struct/class)
                 opaque_type = op_res_type.value_type.value.data
 
                 if opaque_type == "std::string":
-                    # print("String je")
                     fixed_string = sym_value.data.strip('"').strip("'")
                     var_op = EmitC_VariableOp(
-                        EmitC_OpaqueAttr(StringAttr('"' + fixed_string + '"')), op_res_type
+                        EmitC_OpaqueAttr(StringAttr('"' + fixed_string + '"')),
+                        op_res_type,
                     )
-                    # print(var_op)
-                    rewriter.replace_op(op, var_op)
                 else:
-                    # custom type (struct)
-                    # print("Struct je")
                     var_op = EmitC_VariableOp(
-                        EmitC_OpaqueAttr(StringAttr(opaque_type)), op_res_type
+                        EmitC_OpaqueAttr(StringAttr(opaque_type)),
+                        op_res_type,
                     )
-                    # print(var_op)
-                    rewriter.replace_op(op, var_op)
             else:
-                print("Type still not supported: ", op_res_type)
+                return
 
-        else:
-            if isinstance(op_res_type, EmitC_LValueType):
-                inner_type = op_res_type.value_type
-            else:
-                inner_type = op_res_type
-
-            if isinstance(inner_type, IntegerType) and inner_type.width.data == 8:
-                elem_type_str = "int16_t"
-            elif isinstance(inner_type, EmitC_OpaqueType):
-                elem_type_str = inner_type.value.data
-            else:
-                elem_type_str = str(inner_type)
-
-            full_decl = f"{elem_type_str} {name}[{occurs}] = {{0}};"
-
-            verbatim_op = EmitC_VerbatimOp(
-                value=StringAttr(full_decl),
-                operands=[],
-            )
-
-            rewriter.insert_op(verbatim_op, InsertPoint.before(op))
-            var_op = EmitC_VariableOp(
-                value=EmitC_OpaqueAttr(StringAttr(name)),
-                result_types=[
-                    EmitC_LValueType(
-                        EmitC_OpaqueType(StringAttr(elem_type_str))
-                    )
-                ],
-            )
+            if is_external_attr is not None:
+                var_op.attributes["is_external"] = is_external_attr
             rewriter.replace_op(op, var_op)
             return
+
+        if isinstance(op_res_type, EmitC_LValueType):
+            inner_type = op_res_type.value_type
+        else:
+            inner_type = op_res_type
+
+        if isinstance(inner_type, IntegerType) and inner_type.width.data == 8:
+            elem_type_str = "int16_t"
+        elif isinstance(inner_type, EmitC_OpaqueType):
+            elem_type_str = inner_type.value.data
+        else:
+            elem_type_str = str(inner_type)
+
+        full_decl = f"{elem_type_str} {name}[{occurs}] = {{0}};"
+
+        verbatim_op = EmitC_VerbatimOp(
+            value=StringAttr(full_decl),
+            operands=[],
+        )
+
+        rewriter.insert_op(verbatim_op, InsertPoint.before(op))
+
+        var_op = EmitC_VariableOp(
+            value=EmitC_OpaqueAttr(StringAttr(name)),
+            result_types=[
+                EmitC_LValueType(
+                    EmitC_OpaqueType(StringAttr(elem_type_str))
+                )
+            ],
+        )
+
+        if is_external_attr is not None:
+            var_op.attributes["is_external"] = is_external_attr
+
+        rewriter.replace_op(op, var_op)
         return
 
 
@@ -326,7 +368,19 @@ class ConvertDisplayOp(RewritePattern):
         args = list(op.args)
         if op.attributes['index']:
             return
-        placeholders = " << ".join("{}" for _ in args)
+        start_attr = op.start      
+        length_attr = op.length   
+        if start_attr is not None and length_attr is not None and len(args) == 1:
+            start = start_attr.value.data      
+            length = length_attr.value.data
+            string_arg = f"std::cout << {{}}.substr({start - 1}, {length});"
+            verbatim_op = EmitC_VerbatimOp(
+                value=StringAttr(string_arg),
+                operands=list(args),
+            )
+            rewriter.replace_op(op, verbatim_op)
+            return
+        placeholders = " << ".join("{}" for a in args)
         string_arg = "std::cout << " + placeholders + ";"
         verbatim_op = EmitC_VerbatimOp(
             value=StringAttr(string_arg),
